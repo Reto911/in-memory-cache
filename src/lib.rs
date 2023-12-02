@@ -5,8 +5,8 @@
 
 mod block;
 mod memory_cache;
-mod mock;
-mod policy;
+pub mod mock;
+pub mod policy;
 mod storage;
 mod storage_manager;
 

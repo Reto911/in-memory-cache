@@ -1,8 +1,9 @@
 //! Evict policies for cache.
 
+mod infinite;
 mod lru;
 
-#[allow(unused)]
+pub use infinite::Infinite;
 pub use lru::LruPolicy;
 
 /// The evict policy trait.

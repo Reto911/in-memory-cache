@@ -79,6 +79,22 @@ impl Storage for MemoryStorage {
     }
 }
 
+pub struct BlackHole;
+
+impl Storage for BlackHole {
+    fn load(&self, _: INum, _: usize) -> Option<Block> {
+        None
+    }
+
+    fn store(&self, _: INum, _: usize, _: IoBlock) {}
+
+    fn remove(&self, _: INum) {}
+
+    fn invalidate(&self, _: INum) {}
+
+    fn flush(&self, _: INum) {}
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
