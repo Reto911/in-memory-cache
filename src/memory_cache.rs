@@ -40,30 +40,6 @@ impl<P, S> InMemoryCache<P, S> {
         block
     }
 
-    /// Remove a block from the in-memory cache without fetch it from backend.
-    ///
-    /// This method will try its best to ensure the returned block is removed from the cache.
-    fn remove_block_from_cache(&self, ino: INum, block_id: usize) -> Option<Block> {
-        let mut guard = pin();
-        let file_cache = self.map.get(&ino, &guard);
-
-        let block = file_cache
-            .and_then(|file_cache| file_cache.remove_with_guard(&block_id, &guard))
-            .cloned();
-
-        if let Some(0) = file_cache.map(HashMap::size) {
-            self.map.remove(&ino);
-        }
-
-        // Try to increase the epoch by 2.
-        // TODO: Is it really faster than just copy?
-        guard.flush();
-        guard.repin();
-        guard.flush();
-
-        block
-    }
-
     /// Write a block into the cache without writing through.
     ///
     /// If an old block is to be evicted, returns it with its coordinate.
@@ -143,7 +119,7 @@ where
             return;
         }
 
-        let block_in_cache = self.remove_block_from_cache(ino, block_id);
+        let block_in_cache = self.get_block_from_cache(ino, block_id);
 
         let mut to_be_inserted = if let Some(b) = block_in_cache {
             b
