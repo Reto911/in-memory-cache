@@ -1,6 +1,7 @@
 //! The in-memory cache.
 
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash as HashMap};
+use parking_lot::RwLock;
 
 use super::policy::EvictPolicy;
 use super::{Block, BlockCoordinate, IoBlock, Storage};
@@ -9,7 +10,7 @@ use crate::INum;
 /// The in-memory cache, implemented with lockfree hashmaps.
 pub struct InMemoryCache<P, S> {
     /// The inner map where the cached blocks stored
-    map: HashMap<INum, HashMap<usize, Block>>,
+    map: HashMap<INum, HashMap<usize, RwLock<Block>>>,
     /// The evict policy
     policy: P,
     /// The backend storage
@@ -36,32 +37,40 @@ impl<P, S> InMemoryCache<P, S> {
             .map
             .get(&ino, &guard)
             .and_then(|file_cache| file_cache.get(&block_id, &guard))
-            .cloned();
+            .map(|lock| lock.read().clone());
         block
     }
 
-    /// Remove a block from the in-memory cache without fetch it from backend.
-    ///
-    /// This method will try its best to ensure the returned block is removed from the cache.
-    fn remove_block_from_cache(&self, ino: INum, block_id: usize) -> Option<Block> {
-        let mut guard = pin();
-        let file_cache = self.map.get(&ino, &guard);
+    fn merge_two_block(dst: &mut Block, src: &IoBlock) {
+        let start_offset = src.offset();
+        let end_offset = src.end();
+        let len_dst = dst.len();
 
-        let block = file_cache
-            .and_then(|file_cache| file_cache.remove_with_guard(&block_id, &guard))
-            .cloned();
+        dst.make_mut()
+            .get_mut(start_offset..end_offset)
+            .unwrap_or_else(|| {
+                unreachable!(
+                    "Slice {}..{} in block is out of range of {}.",
+                    start_offset, end_offset, len_dst
+                )
+            })
+            .copy_from_slice(src.as_slice());
+    }
 
-        if let Some(0) = file_cache.map(HashMap::size) {
-            self.map.remove(&ino);
+    /// Return true if success
+    fn merge_block_in_place(&self, ino: INum, block_id: usize, to_merge: &IoBlock) -> bool {
+        let guard = pin();
+        if let Some(block) = self
+            .map
+            .get(&ino, &guard)
+            .and_then(|file_cache| file_cache.get(&block_id, &guard))
+        {
+            let mut lock = block.write();
+            Self::merge_two_block(&mut lock, to_merge);
+            true
+        } else {
+            false
         }
-
-        // Try to increase the epoch by 2.
-        // TODO: Is it really faster than just copy?
-        guard.flush();
-        guard.repin();
-        guard.flush();
-
-        block
     }
 
     /// Write a block into the cache without writing through.
@@ -83,13 +92,13 @@ impl<P, S> InMemoryCache<P, S> {
             self.map
                 .get(&coord.0, &guard)
                 .and_then(|file_cache| file_cache.remove_with_guard(&coord.1, &guard))
-                .cloned()
+                .map(|lock| lock.read().clone())
                 .map(|evicted| (coord, evicted))
         });
         // Insert the written block into cache
         self.map
             .get_or_insert(ino, HashMap::new(), &guard)
-            .insert(block_id, block);
+            .insert(block_id, RwLock::new(block));
         evicted
     }
 
@@ -143,11 +152,12 @@ where
             return;
         }
 
-        let block_in_cache = self.remove_block_from_cache(ino, block_id);
+        let inserted = self.merge_block_in_place(ino, block_id, &block);
+        if inserted {
+            return;
+        }
 
-        let mut to_be_inserted = if let Some(b) = block_in_cache {
-            b
-        } else {
+        let mut to_be_inserted = {
             let block_from_backend = self.backend.load(ino, block_id);
             block_from_backend.unwrap_or_else(|| {
                 if start_offset == 0 {
@@ -157,19 +167,8 @@ where
                 }
             })
         };
-        let len_to_be_inserted = to_be_inserted.len();
 
-        // Merge the two blocks
-        to_be_inserted
-            .make_mut()
-            .get_mut(start_offset..end_offset)
-            .unwrap_or_else(|| {
-                unreachable!(
-                    "Slice {}..{} in block is out of range of {}.",
-                    start_offset, end_offset, len_to_be_inserted
-                )
-            })
-            .copy_from_slice(block.as_slice());
+        Self::merge_two_block(&mut to_be_inserted, &block);
 
         self.write_and_evict(ino, block_id, to_be_inserted);
 
