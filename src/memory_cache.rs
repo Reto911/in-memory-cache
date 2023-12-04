@@ -184,7 +184,7 @@ where
     }
 
     fn invalidate(&self, ino: INum) {
-        self.map.remove(&ino);
+        // self.map.remove(&ino);
         self.backend.invalidate(ino);
     }
 
