@@ -61,19 +61,14 @@ impl<P, S> InMemoryCache<P, S> {
     fn merge_block_in_place(&self, ino: INum, block_id: usize, to_merge: &IoBlock) -> bool {
         let guard = pin();
 
-        let res = if let Some(lock) = self
+        let res = if let Some(mut lock) = self
             .map
             .get(&ino, &guard)
-            .map(|file_cache| file_cache.upgradable_read())
+            .map(|file_cache| file_cache.write())
         {
-            if lock.contains_key(&block_id) {
-                let mut lock = RwLockUpgradableReadGuard::upgrade(lock);
-                if let Some(block) = lock.get_mut(&block_id) {
-                    Self::merge_two_block(block, to_merge);
-                    true
-                } else {
-                    false
-                }
+            if let Some(block) = lock.get_mut(&block_id) {
+                Self::merge_two_block(block, to_merge);
+                true
             } else {
                 false
             }
