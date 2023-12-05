@@ -1,7 +1,7 @@
 //! The in-memory cache.
 
 use lockfree_cuckoohash::{pin, LockFreeCuckooHash as HashMap};
-use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use parking_lot::RwLock;
 use std::collections::HashMap as StdHashMap;
 
 use super::policy::EvictPolicy;
