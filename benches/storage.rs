@@ -79,40 +79,66 @@ fn test_read_after_write<S>(storage: StorageManager<S>, content_size: usize)
 where
     S: Storage + Send + Sync + 'static,
 {
-    const LIMIT: usize = 5;
-    let segment_size = content_size / LIMIT;
+    const JOBS: usize = 8;
 
+    let request_num = content_size / REQUEST_SIZE;
+
+    // in requests
     let write_pointer = AtomicUsize::new(0);
     let ino = 0;
 
     thread::scope(|s| {
-        // Writer
-        s.spawn(|| {
-            for point in 0..=LIMIT {
-                let offset = point * segment_size;
-                let content = vec![0u8; segment_size];
-                storage.store(ino, offset, &content, SystemTime::now());
-                write_pointer.store(point, Ordering::Release);
-                // println!("Point: {point}, seg_size: {segment_size}, offset: {offset}");
-            }
-        });
-        // Reader
-        s.spawn(|| {
-            for i in 0..LIMIT {
-                let offset = i * segment_size;
+        for i in 0..JOBS {
+            let sto = &storage;
+            let wp = &write_pointer;
 
+            // Writer
+            s.spawn(move || {
+                let content = vec![0u8; REQUEST_SIZE];
+                let mut request_offset = i;
                 loop {
-                    if write_pointer.load(Ordering::Acquire) > i {
+                    if request_offset >= request_num {
                         break;
-                    } else {
-                        thread::yield_now();
                     }
+                    let offset = request_offset * REQUEST_SIZE;
+                    sto.store(ino, offset, &content, SystemTime::now());
+                    loop {
+                        let exchange_res = wp.compare_exchange(
+                            request_offset,
+                            request_offset + 1,
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        );
+                        if exchange_res.is_ok() {
+                            break;
+                        }
+                    }
+                    request_offset += JOBS;
                 }
+            });
 
-                let loaded = storage.load(ino, offset, segment_size, SystemTime::now());
-                assert!(!loaded.is_empty(), "Segment {i} is empty.");
-            }
-        });
+            // Reader
+            s.spawn(move || {
+                let mut request_offset = i;
+                loop {
+                    if request_offset >= request_num {
+                        break;
+                    }
+                    // println!("Read {request_offset}");
+                    loop {
+                        if wp.load(Ordering::Acquire) <= request_offset {
+                            thread::yield_now();
+                        } else {
+                            break;
+                        }
+                    }
+                    let offset = request_offset * REQUEST_SIZE;
+                    let loaded = sto.load(ino, offset, REQUEST_SIZE, SystemTime::now());
+                    assert!(!loaded.is_empty());
+                    request_offset += JOBS;
+                }
+            });
+        }
     });
 }
 
@@ -162,7 +188,7 @@ pub fn overwrite(c: &mut Criterion) {
 
 pub fn read_after_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("Read after Write");
-    let content_size = 64 * MB_SIZE;
+    let content_size = 128 * MB_SIZE;
     group.throughput(criterion::Throughput::Bytes(content_size as u64));
     for block_size in BLOCK_SIZES_IN_KB.iter().map(|s| s * KB_SIZE) {
         group.bench_with_input(
@@ -172,10 +198,15 @@ pub fn read_after_write(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let cache = InMemoryCache::new(Infinite, BlackHole, block_size);
+                        let content = vec![0u8; content_size];
+                        for (request, block_id) in content.chunks(REQUEST_SIZE).zip(0..) {
+                            let block = create_block!(request);
+                            cache.store(0, block_id, block);
+                        }
                         StorageManager::new(cache, block_size)
                     },
                     |s| test_read_after_write(s, content_size),
-                    criterion::BatchSize::SmallInput,
+                    criterion::BatchSize::PerIteration,
                 )
             },
         );
@@ -184,7 +215,7 @@ pub fn read_after_write(c: &mut Criterion) {
 
 fn configure() -> Criterion {
     Criterion::default()
-        .measurement_time(Duration::from_secs(90))
+        .measurement_time(Duration::from_secs(30))
         .sample_size(10)
 }
 
@@ -206,4 +237,4 @@ criterion_group!(
     targets = read_after_write
 );
 
-criterion_main!(append_group, overwrite_group, read_after_write_group);
+criterion_main!(read_after_write_group);
